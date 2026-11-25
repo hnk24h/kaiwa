@@ -1,5 +1,7 @@
 export type BookCategory = 'basic' | 'intermediate-advanced' | 'business'
 
+export type MediaMode = 'server' | 'local-folder'
+
 export interface AudioTrack {
   id: string
   title: string

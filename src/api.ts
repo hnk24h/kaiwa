@@ -1,6 +1,7 @@
-import { CatalogResponse, StudySettings, StudyState } from './types'
+import { CatalogResponse, MediaMode, StudySettings, StudyState } from './types'
 
 const LOCAL_CACHE_KEY = 'kaiwa-shadowing-state-v1'
+const API_BASE_KEY = 'kaiwa-api-base-url'
 
 export const DEFAULT_SETTINGS: StudySettings = {
   dailyGoalMinutes: 20,
@@ -21,35 +22,81 @@ export const DEFAULT_STATE: StudyState = {
   settings: { ...DEFAULT_SETTINGS },
 }
 
-export async function fetchCatalog(): Promise<CatalogResponse> {
-  const res = await fetch('/api/catalog')
-  if (!res.ok) {
-    throw new Error(`Không thể tải danh sách sách (${res.status})`)
+export function getApiBaseUrl(): string {
+  try {
+    return (localStorage.getItem(API_BASE_KEY) || '').trim().replace(/\/+$/, '')
+  } catch {
+    return ''
   }
-  return res.json()
 }
 
-export async function fetchState(): Promise<StudyState> {
+export function setApiBaseUrl(url: string): void {
+  const cleaned = url.trim().replace(/\/+$/, '')
   try {
-    const res = await fetch('/api/state')
-    if (res.ok) {
-      const data = await res.json()
-      const merged: StudyState = {
-        ...DEFAULT_STATE,
-        ...data,
-        settings: { ...DEFAULT_SETTINGS, ...(data?.settings || {}) },
-      }
-      try {
-        localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(merged))
-      } catch {
-        // ignore storage quota
-      }
-      return merged
+    if (cleaned) {
+      localStorage.setItem(API_BASE_KEY, cleaned)
+    } else {
+      localStorage.removeItem(API_BASE_KEY)
     }
   } catch {
-    // fallback to localStorage cache
+    // ignore
   }
+}
 
+function prefixMediaUrl(baseUrl: string, url: string | null): string | null {
+  if (!url) return null
+  if (!baseUrl) return url
+  if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('local://')) {
+    return url
+  }
+  return `${baseUrl}${url}`
+}
+
+function normalizeServerCatalog(baseUrl: string, raw: CatalogResponse): CatalogResponse {
+  if (!baseUrl) return raw
+  return {
+    ...raw,
+    books: raw.books.map((book) => ({
+      ...book,
+      pdfUrl: prefixMediaUrl(baseUrl, book.pdfUrl),
+      kaitouPdfUrl: prefixMediaUrl(baseUrl, book.kaitouPdfUrl),
+      coverUrl: prefixMediaUrl(baseUrl, book.coverUrl),
+      sections: book.sections.map((sec) => ({
+        ...sec,
+        tracks: sec.tracks.map((t) => ({
+          ...t,
+          url: prefixMediaUrl(baseUrl, t.url) || t.url,
+        })),
+      })),
+    })),
+  }
+}
+
+export async function fetchCatalog(): Promise<{
+  mode: MediaMode
+  catalog: CatalogResponse | null
+}> {
+  const baseUrl = getApiBaseUrl()
+  try {
+    const res = await fetch(`${baseUrl}/api/catalog`)
+    const contentType = res.headers.get('content-type') || ''
+    if (!res.ok || !contentType.includes('application/json')) {
+      return { mode: 'local-folder', catalog: null }
+    }
+    const data = (await res.json()) as CatalogResponse
+    if (!data || !Array.isArray(data.books)) {
+      return { mode: 'local-folder', catalog: null }
+    }
+    return {
+      mode: 'server',
+      catalog: normalizeServerCatalog(baseUrl, data),
+    }
+  } catch {
+    return { mode: 'local-folder', catalog: null }
+  }
+}
+
+function loadLocalState(): StudyState {
   try {
     const raw = localStorage.getItem(LOCAL_CACHE_KEY)
     if (raw) {
@@ -66,14 +113,44 @@ export async function fetchState(): Promise<StudyState> {
   return structuredClone(DEFAULT_STATE)
 }
 
-export async function saveState(state: StudyState): Promise<void> {
+export async function fetchState(mode: MediaMode = 'server'): Promise<StudyState> {
+  if (mode === 'server') {
+    const baseUrl = getApiBaseUrl()
+    try {
+      const res = await fetch(`${baseUrl}/api/state`)
+      const contentType = res.headers.get('content-type') || ''
+      if (res.ok && contentType.includes('application/json')) {
+        const data = await res.json()
+        const merged: StudyState = {
+          ...DEFAULT_STATE,
+          ...data,
+          settings: { ...DEFAULT_SETTINGS, ...(data?.settings || {}) },
+        }
+        try {
+          localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(merged))
+        } catch {
+          // ignore
+        }
+        return merged
+      }
+    } catch {
+      // fallback to localStorage cache
+    }
+  }
+  return loadLocalState()
+}
+
+export async function saveState(state: StudyState, mode: MediaMode = 'server'): Promise<void> {
   try {
     localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(state))
   } catch {
     // ignore
   }
 
-  const res = await fetch('/api/state', {
+  if (mode !== 'server') return
+
+  const baseUrl = getApiBaseUrl()
+  const res = await fetch(`${baseUrl}/api/state`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(state),
@@ -86,7 +163,8 @@ export async function saveState(state: StudyState): Promise<void> {
 export async function updateMediaRoot(
   mediaRoot: string
 ): Promise<{ mediaRoot: string; mediaRootExists: boolean; bookCount: number }> {
-  const res = await fetch('/api/config', {
+  const baseUrl = getApiBaseUrl()
+  const res = await fetch(`${baseUrl}/api/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mediaRoot }),

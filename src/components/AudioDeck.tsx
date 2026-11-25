@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { AudioTrack, KaiwaNote } from '../types'
+import { isLocalMediaUrl, resolveAudioObjectUrl } from '../utils/localFolderCatalog'
 import { formatTime } from '../utils/time'
 import {
   BookmarkPlus,
@@ -18,6 +19,7 @@ const SPEED_OPTIONS = [0.65, 0.75, 0.85, 0.95, 1.0, 1.1, 1.25]
 
 interface AudioDeckProps {
   track: AudioTrack | null
+  autoPlayRequestId?: number
   audioRef: React.RefObject<HTMLAudioElement | null>
   isPlaying: boolean
   onPlayingChange: (playing: boolean) => void
@@ -52,6 +54,7 @@ interface AudioDeckProps {
 
 export const AudioDeck: React.FC<AudioDeckProps> = ({
   track,
+  autoPlayRequestId = 0,
   audioRef,
   isPlaying,
   onPlayingChange,
@@ -85,8 +88,40 @@ export const AudioDeck: React.FC<AudioDeckProps> = ({
 }) => {
   const [volume, setVolume] = useState(1)
   const [waitingBetweenLoops, setWaitingBetweenLoops] = useState(false)
+  const [resolvedSrc, setResolvedSrc] = useState<string | undefined>(undefined)
   const pauseTimerRef = useRef<number | null>(null)
   const timelineRef = useRef<HTMLDivElement | null>(null)
+  const pendingAutoPlayRef = useRef<number>(0)
+
+  useEffect(() => {
+    if (autoPlayRequestId > 0) {
+      pendingAutoPlayRef.current = autoPlayRequestId
+    }
+  }, [autoPlayRequestId])
+
+  useEffect(() => {
+    let active = true
+    const rawUrl = track?.url
+    if (!rawUrl) {
+      setResolvedSrc(undefined)
+      return
+    }
+    if (!isLocalMediaUrl(rawUrl)) {
+      setResolvedSrc(rawUrl)
+      return
+    }
+    setResolvedSrc(undefined)
+    resolveAudioObjectUrl(rawUrl)
+      .then((objUrl) => {
+        if (active) setResolvedSrc(objUrl || undefined)
+      })
+      .catch(() => {
+        if (active) setResolvedSrc(undefined)
+      })
+    return () => {
+      active = false
+    }
+  }, [track?.url])
 
   useEffect(() => {
     const audio = audioRef.current
@@ -180,13 +215,17 @@ export const AudioDeck: React.FC<AudioDeckProps> = ({
     <div className="border-t border-stone-200 bg-white px-3 py-2.5 shadow-[0_-4px_20px_rgba(0,0,0,0.04)] dark:border-slate-800 dark:bg-slate-900 sm:px-5">
       <audio
         ref={audioRef}
-        src={track?.url || undefined}
+        src={resolvedSrc}
         preload="metadata"
         onLoadedMetadata={(e) => {
           const el = e.currentTarget
           el.playbackRate = speed
           el.preservesPitch = true
           onDurationChange(el.duration || 0)
+          if (pendingAutoPlayRef.current > 0) {
+            pendingAutoPlayRef.current = 0
+            el.play().catch(() => {})
+          }
         }}
         onTimeUpdate={handleTimeUpdateEvent}
         onPlay={() => onPlayingChange(true)}

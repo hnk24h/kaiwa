@@ -3,19 +3,29 @@ import {
   DEFAULT_STATE,
   fetchCatalog,
   fetchState,
+  getApiBaseUrl,
   saveState,
+  setApiBaseUrl,
   updateMediaRoot,
 } from './api'
 import {
   Book,
   CatalogResponse,
   HomeTab,
+  MediaMode,
   ReviewRating,
   ShadowingStep,
   StudyPlan,
   StudySettings,
   StudyState,
 } from './types'
+import {
+  checkSavedDirectory,
+  isDirectoryPickerSupported,
+  loadCatalogFromFileList,
+  pickLocalFolderCatalog,
+  reconnectSavedFolderCatalog,
+} from './utils/localFolderCatalog'
 import { applyReviewRating, getDueReviewItems } from './utils/srs'
 import { markTrackCompletedInPlan, shiftPlanToToday } from './utils/studyPlan'
 import { getTodayKey } from './utils/time'
@@ -24,7 +34,16 @@ import { LibraryView } from './components/LibraryView'
 import { StudyPlanView } from './components/StudyPlanView'
 import { ProgressReviewView } from './components/ProgressReviewView'
 import { ShadowingStudio } from './components/ShadowingStudio'
-import { Loader2, X } from 'lucide-react'
+import {
+  Download,
+  FolderOpen,
+  FolderSync,
+  HardDrive,
+  Loader2,
+  Server,
+  Upload,
+  X,
+} from 'lucide-react'
 
 interface ActiveStudioSession {
   book: Book
@@ -35,44 +54,79 @@ interface ActiveStudioSession {
 }
 
 export default function App() {
+  const [mediaMode, setMediaMode] = useState<MediaMode>('server')
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null)
   const [state, setState] = useState<StudyState>(DEFAULT_STATE)
   const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
   const [studio, setStudio] = useState<ActiveStudioSession | null>(null)
   const [activeHomeTab, setActiveHomeTab] = useState<HomeTab>('library')
+
+  // Browser local-folder state (for Vercel / static hosting)
+  const [savedFolderName, setSavedFolderName] = useState<string | null>(null)
+  const [folderPicking, setFolderPicking] = useState(false)
 
   // Global Settings Modal state
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [rootInput, setRootInput] = useState('')
   const [rootSaving, setRootSaving] = useState(false)
   const [rootFeedback, setRootFeedback] = useState<string | null>(null)
+  const [apiUrlInput, setApiUrlInput] = useState(() => getApiBaseUrl())
+  const [apiFeedback, setApiFeedback] = useState<string | null>(null)
 
+  const settingsFileInputRef = useRef<HTMLInputElement | null>(null)
+  const importStateInputRef = useRef<HTMLInputElement | null>(null)
   const saveTimerRef = useRef<number | null>(null)
   const hydratedRef = useRef(false)
 
-  useEffect(() => {
-    let active = true
-    Promise.all([fetchCatalog(), fetchState()])
-      .then(([cat, st]) => {
-        if (!active) return
-        setCatalog(cat)
-        setState(st)
-        setRootInput(cat.mediaRoot)
-        hydratedRef.current = true
-      })
-      .catch((err) => {
-        if (!active) return
-        setLoadError(err instanceof Error ? err.message : 'Lỗi kết nối server')
-      })
-      .finally(() => {
-        if (active) setLoading(false)
-      })
+  const hydrateApp = useCallback(async () => {
+    setLoading(true)
+    const { mode, catalog: serverCat } = await fetchCatalog()
+    setMediaMode(mode)
 
-    return () => {
-      active = false
+    const st = await fetchState(mode)
+    setState(st)
+    hydratedRef.current = true
+
+    if (mode === 'server' && serverCat) {
+      setCatalog(serverCat)
+      setRootInput(serverCat.mediaRoot)
+      setLoading(false)
+      return
     }
+
+    // Local-folder mode (e.g. Vercel deployment)
+    const saved = await checkSavedDirectory()
+    if (saved) {
+      setSavedFolderName(saved.name)
+      if (saved.permission === 'granted') {
+        try {
+          const loaded = await reconnectSavedFolderCatalog()
+          if (loaded) {
+            setCatalog({
+              mediaRoot: loaded.folderName,
+              mediaRootExists: loaded.books.length > 0,
+              books: loaded.books,
+            })
+            setLoading(false)
+            return
+          }
+        } catch {
+          // fall through to prompt reconnection UI
+        }
+      }
+    }
+
+    setCatalog({
+      mediaRoot: saved?.name || 'Chưa chọn thư mục',
+      mediaRootExists: false,
+      books: [],
+    })
+    setLoading(false)
   }, [])
+
+  useEffect(() => {
+    hydrateApp()
+  }, [hydrateApp])
 
   // Apply Dark Mode class
   useEffect(() => {
@@ -91,14 +145,73 @@ export default function App() {
       window.clearTimeout(saveTimerRef.current)
     }
     saveTimerRef.current = window.setTimeout(() => {
-      saveState(state).catch(() => {})
+      saveState(state, mediaMode).catch(() => {})
     }, 500)
     return () => {
       if (saveTimerRef.current) {
         window.clearTimeout(saveTimerRef.current)
       }
     }
-  }, [state])
+  }, [state, mediaMode])
+
+  const handlePickLocalFolder = useCallback(async () => {
+    setFolderPicking(true)
+    setApiFeedback(null)
+    try {
+      const { folderName, books } = await pickLocalFolderCatalog()
+      setMediaMode('local-folder')
+      setSavedFolderName(folderName)
+      setCatalog({
+        mediaRoot: folderName,
+        mediaRootExists: books.length > 0,
+        books,
+      })
+      setApiFeedback(
+        books.length > 0
+          ? `Đã kết nối thư mục "${folderName}" (${books.length} bộ sách).`
+          : `Đã mở "${folderName}" nhưng chưa thấy sách PDF/Audio phù hợp.`
+      )
+    } catch (err) {
+      if ((err as { name?: string })?.name !== 'AbortError') {
+        setApiFeedback(err instanceof Error ? err.message : 'Không thể mở thư mục.')
+      }
+    } finally {
+      setFolderPicking(false)
+    }
+  }, [])
+
+  const handleReconnectSavedFolder = useCallback(async () => {
+    setFolderPicking(true)
+    try {
+      const res = await reconnectSavedFolderCatalog()
+      if (res) {
+        setMediaMode('local-folder')
+        setSavedFolderName(res.folderName)
+        setCatalog({
+          mediaRoot: res.folderName,
+          mediaRootExists: res.books.length > 0,
+          books: res.books,
+        })
+      }
+    } finally {
+      setFolderPicking(false)
+    }
+  }, [])
+
+  const handleFilesSelected = useCallback(async (files: FileList) => {
+    setFolderPicking(true)
+    try {
+      const { folderName, books } = await loadCatalogFromFileList(files)
+      setMediaMode('local-folder')
+      setCatalog({
+        mediaRoot: folderName,
+        mediaRootExists: books.length > 0,
+        books,
+      })
+    } finally {
+      setFolderPicking(false)
+    }
+  }, [])
 
   const handleUpdateState = useCallback((updater: (prev: StudyState) => StudyState) => {
     setState((prev) => updater(prev))
@@ -130,9 +243,7 @@ export default function App() {
     setState((prev) => ({
       ...prev,
       studyPlan: plan,
-      settings: plan
-        ? { ...prev.settings, dailyGoalMinutes: plan.minutesPerDay }
-        : prev.settings,
+      settings: plan ? { ...prev.settings, dailyGoalMinutes: plan.minutesPerDay } : prev.settings,
     }))
   }, [])
 
@@ -166,8 +277,8 @@ export default function App() {
 
   const handleUpdateMediaRoot = useCallback(async (nextRoot: string) => {
     await updateMediaRoot(nextRoot)
-    const nextCat = await fetchCatalog()
-    setCatalog(nextCat)
+    const { catalog: nextCat } = await fetchCatalog()
+    if (nextCat) setCatalog(nextCat)
   }, [])
 
   async function handleSaveMediaRootForm(e: React.FormEvent) {
@@ -185,6 +296,57 @@ export default function App() {
     }
   }
 
+  async function handleApplyRemoteApiUrl(e: React.FormEvent) {
+    e.preventDefault()
+    setApiFeedback(null)
+    setApiBaseUrl(apiUrlInput)
+    const { mode, catalog: nextCat } = await fetchCatalog()
+    if (mode === 'server' && nextCat) {
+      setMediaMode('server')
+      setCatalog(nextCat)
+      setRootInput(nextCat.mediaRoot)
+      const st = await fetchState('server')
+      setState(st)
+      setApiFeedback(`Đã kết nối thành công tới Server Media (${nextCat.books.length} cuốn).`)
+    } else if (apiUrlInput.trim()) {
+      setApiFeedback(
+        'Không kết nối được tới URL Server Media này (kiểm tra server đang chạy và CORS/HTTPS).'
+      )
+    } else {
+      setMediaMode('local-folder')
+      setApiFeedback('Đã chuyển về chế độ đọc thư mục trực tiếp trên trình duyệt.')
+    }
+  }
+
+  function handleExportProgress() {
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `kaiwa-shadowing-backup-${getTodayKey()}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function handleImportProgress(file: File) {
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || '{}'))
+        setState((prev) => ({
+          ...DEFAULT_STATE,
+          ...prev,
+          ...parsed,
+          settings: { ...DEFAULT_STATE.settings, ...(parsed?.settings || {}) },
+        }))
+        setApiFeedback('Đã khôi phục tiến độ học thành công.')
+      } catch {
+        setApiFeedback('File JSON sao lưu không hợp lệ.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
   const dueReviewCount = useMemo(() => {
     if (!catalog) return 0
     return getDueReviewItems(catalog.books, state.trackProgress).length
@@ -195,30 +357,16 @@ export default function App() {
       <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-paper text-ink dark:bg-slate-950 dark:text-slate-100">
         <Loader2 className="h-8 w-8 animate-spin text-indigoKaiwa" />
         <p className="text-sm font-medium text-stone-600 dark:text-slate-300">
-          Đang tải thư viện sách & audio Shadowing...
+          Đang tải thư viện sách &amp; audio Shadowing...
         </p>
       </div>
     )
   }
 
-  if (loadError || !catalog) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-paper p-6 dark:bg-slate-950">
-        <div className="max-w-md rounded-2xl border border-red-200 bg-white p-6 text-center shadow-sm dark:border-red-900 dark:bg-slate-900">
-          <h1 className="text-base font-bold text-red-600">Không kết nối được Server Media</h1>
-          <p className="mt-2 text-xs text-stone-600 dark:text-slate-300">
-            {loadError || 'Vui lòng chạy server Node.js bằng lệnh npm run dev hoặc npm start.'}
-          </p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            className="mt-4 rounded-lg bg-indigoKaiwa px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
-          >
-            Thử lại
-          </button>
-        </div>
-      </div>
-    )
+  const resolvedCatalog: CatalogResponse = catalog || {
+    mediaRoot: 'Chưa chọn thư mục',
+    mediaRootExists: false,
+    books: [],
   }
 
   if (studio) {
@@ -247,34 +395,42 @@ export default function App() {
         darkMode={state.settings.darkMode}
         onToggleDarkMode={() => handleUpdateSettings({ darkMode: !state.settings.darkMode })}
         onOpenSettings={() => {
-          setRootInput(catalog.mediaRoot)
+          setRootInput(resolvedCatalog.mediaRoot)
           setRootFeedback(null)
+          setApiFeedback(null)
           setSettingsOpen(true)
         }}
       />
 
       {activeHomeTab === 'library' && (
         <LibraryView
-          books={catalog.books}
-          mediaRoot={catalog.mediaRoot}
-          mediaRootExists={catalog.mediaRootExists}
+          books={resolvedCatalog.books}
+          mediaMode={mediaMode}
+          mediaRoot={resolvedCatalog.mediaRoot}
+          mediaRootExists={resolvedCatalog.mediaRootExists}
+          savedFolderName={savedFolderName}
+          folderPicking={folderPicking}
           state={state}
           dueReviewCount={dueReviewCount}
           onOpenBook={(book, trackId, pdfPage, pdfKind) =>
             setStudio({ book, trackId, pdfPage, pdfKind })
           }
           onOpenSettings={() => {
-            setRootInput(catalog.mediaRoot)
+            setRootInput(resolvedCatalog.mediaRoot)
             setRootFeedback(null)
+            setApiFeedback(null)
             setSettingsOpen(true)
           }}
           onNavigateTab={setActiveHomeTab}
+          onPickLocalFolder={handlePickLocalFolder}
+          onReconnectSavedFolder={handleReconnectSavedFolder}
+          onFilesSelected={handleFilesSelected}
         />
       )}
 
       {activeHomeTab === 'plan' && (
         <StudyPlanView
-          books={catalog.books}
+          books={resolvedCatalog.books}
           state={state}
           onSavePlan={handleSavePlan}
           onShiftPlanToToday={handleShiftPlanToToday}
@@ -287,7 +443,7 @@ export default function App() {
 
       {activeHomeTab === 'progress' && (
         <ProgressReviewView
-          books={catalog.books}
+          books={resolvedCatalog.books}
           state={state}
           onRateReview={handleRateReview}
           onOpenTrack={(book, trackId, pdfPage, pdfKind, initialStep) =>
@@ -296,12 +452,38 @@ export default function App() {
         />
       )}
 
+      {/* Hidden inputs for settings modal */}
+      <input
+        ref={settingsFileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            handleFilesSelected(e.target.files)
+          }
+          e.currentTarget.value = ''
+        }}
+      />
+      <input
+        ref={importStateInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) handleImportProgress(f)
+          e.currentTarget.value = ''
+        }}
+      />
+
       {/* Global Settings Modal */}
       {settingsOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-lg rounded-2xl border border-stone-200 bg-white p-6 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-stone-200 bg-white p-6 shadow-xl dark:border-slate-700 dark:bg-slate-900">
             <div className="flex items-center justify-between border-b border-stone-100 pb-3 dark:border-slate-800">
-              <h2 className="text-base font-bold">Cài đặt tự học & Thư mục sách</h2>
+              <h2 className="text-base font-bold">Cài đặt tự học &amp; Nguồn sách Media</h2>
               <button
                 type="button"
                 onClick={() => setSettingsOpen(false)}
@@ -312,32 +494,117 @@ export default function App() {
             </div>
 
             <div className="mt-4 space-y-4">
-              <form onSubmit={handleSaveMediaRootForm} className="space-y-2">
+              {/* Active Source Mode Badge */}
+              <div className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-50 p-3 text-xs dark:border-slate-700 dark:bg-slate-800/70">
+                <div className="flex items-center gap-2">
+                  {mediaMode === 'local-folder' ? (
+                    <HardDrive className="h-4 w-4 text-matcha" />
+                  ) : (
+                    <Server className="h-4 w-4 text-indigoKaiwa" />
+                  )}
+                  <div>
+                    <p className="font-bold">
+                      {mediaMode === 'local-folder'
+                        ? 'Đọc trực tiếp từ thư mục trên máy (Vercel / Trình duyệt)'
+                        : 'Đang kết nối Server Media'}
+                    </p>
+                    <p className="text-[11px] text-stone-500 dark:text-slate-400">
+                      {resolvedCatalog.books.length} bộ sách sẵn sàng
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Local Folder Picker (works on Vercel & localhost) */}
+              <div className="space-y-2 rounded-xl border border-stone-200 p-3.5 dark:border-slate-700">
+                <p className="text-xs font-semibold text-stone-700 dark:text-slate-200">
+                  1. Chọn thư mục sách trên máy tính (khuyên dùng khi chạy trên Vercel)
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {savedFolderName && (
+                    <button
+                      type="button"
+                      disabled={folderPicking}
+                      onClick={handleReconnectSavedFolder}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-matcha px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+                    >
+                      <FolderSync className="h-3.5 w-3.5" />
+                      Mở lại &ldquo;{savedFolderName}&rdquo;
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={folderPicking}
+                    onClick={() => {
+                      if (isDirectoryPickerSupported()) handlePickLocalFolder()
+                      else settingsFileInputRef.current?.click()
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-indigoKaiwa px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
+                  >
+                    <FolderOpen className="h-3.5 w-3.5" />
+                    Chọn thư mục (D:\02. Tiếng Nhật\luyennoi)
+                  </button>
+                </div>
+              </div>
+
+              {/* Server Media Root path when connected to Server */}
+              {mediaMode === 'server' && (
+                <form onSubmit={handleSaveMediaRootForm} className="space-y-2">
+                  <label className="block text-xs font-semibold text-stone-700 dark:text-slate-300">
+                    Đường dẫn thư mục trên Server Media
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={rootInput}
+                      onChange={(e) => setRootInput(e.target.value)}
+                      className="flex-1 rounded-lg border border-stone-300 bg-white px-3 py-2 text-xs focus:border-indigoKaiwa focus:outline-none dark:border-slate-700 dark:bg-slate-800"
+                      placeholder="/mnt/d/02. Tiếng Nhật/luyennoi"
+                    />
+                    <button
+                      type="submit"
+                      disabled={rootSaving}
+                      className="rounded-lg bg-indigoKaiwa px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+                    >
+                      {rootSaving ? 'Đang lưu...' : 'Áp dụng'}
+                    </button>
+                  </div>
+                  {rootFeedback && (
+                    <p className="text-xs text-indigoKaiwa dark:text-indigo-300">{rootFeedback}</p>
+                  )}
+                </form>
+              )}
+
+              {/* Optional Remote Media Server URL */}
+              <form
+                onSubmit={handleApplyRemoteApiUrl}
+                className="space-y-2 rounded-xl border border-stone-200 p-3.5 dark:border-slate-700"
+              >
                 <label className="block text-xs font-semibold text-stone-700 dark:text-slate-300">
-                  Thư mục chứa sách PDF & Audio
+                  2. URL Server Media từ xa / Localhost (tùy chọn nâng cao)
                 </label>
                 <div className="flex gap-2">
                   <input
                     type="text"
-                    value={rootInput}
-                    onChange={(e) => setRootInput(e.target.value)}
+                    value={apiUrlInput}
+                    onChange={(e) => setApiUrlInput(e.target.value)}
                     className="flex-1 rounded-lg border border-stone-300 bg-white px-3 py-2 text-xs focus:border-indigoKaiwa focus:outline-none dark:border-slate-700 dark:bg-slate-800"
-                    placeholder="/mnt/d/02. Tiếng Nhật/luyennoi"
+                    placeholder="Để trống nếu đọc trực tiếp trên máy (hoặc nhập https://...)"
                   />
                   <button
                     type="submit"
-                    disabled={rootSaving}
-                    className="rounded-lg bg-indigoKaiwa px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+                    className="rounded-lg border border-stone-300 bg-white px-3 py-2 text-xs font-semibold text-stone-700 hover:bg-stone-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200"
                   >
-                    {rootSaving ? 'Đang lưu...' : 'Áp dụng'}
+                    Kết nối
                   </button>
                 </div>
-                {rootFeedback && (
-                  <p className="text-xs text-indigoKaiwa dark:text-indigo-300">{rootFeedback}</p>
+                {apiFeedback && (
+                  <p className="text-xs text-indigoKaiwa dark:text-indigo-300">{apiFeedback}</p>
                 )}
               </form>
 
-              <div className="grid grid-cols-2 gap-3 pt-2">
+              {/* Study Preferences */}
+              <div className="grid grid-cols-2 gap-3 pt-1">
                 <div>
                   <label className="block text-xs font-semibold text-stone-700 dark:text-slate-300">
                     Mục tiêu mỗi ngày (phút)
@@ -425,6 +692,31 @@ export default function App() {
                   className="h-4 w-4 accent-indigoKaiwa"
                 />
               </label>
+
+              {/* Backup / Restore JSON */}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-stone-100 pt-3 dark:border-slate-800">
+                <span className="text-xs font-semibold text-stone-600 dark:text-slate-300">
+                  Sao lưu tiến độ &amp; sổ tay Kaiwa
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleExportProgress}
+                    className="inline-flex items-center gap-1 rounded-lg border border-stone-200 px-2.5 py-1.5 text-xs font-medium hover:bg-stone-50 dark:border-slate-700 dark:hover:bg-slate-800"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Xuất JSON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => importStateInputRef.current?.click()}
+                    className="inline-flex items-center gap-1 rounded-lg border border-stone-200 px-2.5 py-1.5 text-xs font-medium hover:bg-stone-50 dark:border-slate-700 dark:hover:bg-slate-800"
+                  >
+                    <Upload className="h-3.5 w-3.5" />
+                    Nhập JSON
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div className="mt-6 flex justify-end">

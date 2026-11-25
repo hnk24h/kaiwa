@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import * as pdfjsLib from 'pdfjs-dist'
-import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
+import type { PDFDocumentProxy, PDFDocumentLoadingTask, RenderTask } from 'pdfjs-dist'
 import { PdfMaskMode } from '../types'
+import { getLocalFile, isLocalMediaUrl } from '../utils/localFolderCatalog'
 import {
   ChevronLeft,
   ChevronRight,
@@ -24,6 +25,27 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
   import.meta.url
 ).toString()
+
+class LocalFileRangeTransport extends pdfjsLib.PDFDataRangeTransport {
+  private file: File
+
+  constructor(file: File) {
+    super(file.size, null)
+    this.file = file
+  }
+
+  requestDataRange(begin: number, end: number): void {
+    this.file
+      .slice(begin, end)
+      .arrayBuffer()
+      .then((buf) => {
+        this.onDataRange(begin, new Uint8Array(buf))
+      })
+      .catch(() => {
+        this.onDataRange(begin, null)
+      })
+  }
+}
 
 interface PdfCanvasViewerProps {
   mainPdfUrl: string | null
@@ -107,18 +129,34 @@ export const PdfCanvasViewer: React.FC<PdfCanvasViewerProps> = ({
     }
 
     let cancelled = false
+    let loadingTask: PDFDocumentLoadingTask | null = null
     setLoadingDoc(true)
     setErrorMsg(null)
 
-    const loadingTask = pdfjsLib.getDocument({
-      url: activeUrl,
-      disableAutoFetch: true,
-      disableStream: false,
-      rangeChunkSize: 65536,
-    })
+    ;(async () => {
+      try {
+        if (isLocalMediaUrl(activeUrl)) {
+          const file = await getLocalFile(activeUrl)
+          if (cancelled) return
+          if (!file) {
+            setErrorMsg('Không tìm thấy file PDF trong thư mục đã chọn.')
+            setLoadingDoc(false)
+            return
+          }
+          loadingTask = pdfjsLib.getDocument({
+            range: new LocalFileRangeTransport(file),
+            length: file.size,
+          })
+        } else {
+          loadingTask = pdfjsLib.getDocument({
+            url: activeUrl,
+            disableAutoFetch: true,
+            disableStream: false,
+            rangeChunkSize: 65536,
+          })
+        }
 
-    loadingTask.promise
-      .then((doc) => {
+        const doc = await loadingTask.promise
         if (cancelled) {
           doc.destroy()
           return
@@ -131,18 +169,17 @@ export const PdfCanvasViewer: React.FC<PdfCanvasViewerProps> = ({
         if (page > doc.numPages) {
           onChangePage(1)
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         if (cancelled) return
         setErrorMsg(err instanceof Error ? err.message : 'Không thể mở file PDF')
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoadingDoc(false)
-      })
+      }
+    })()
 
     return () => {
       cancelled = true
-      loadingTask.destroy().catch(() => {})
+      loadingTask?.destroy().catch(() => {})
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeUrl])

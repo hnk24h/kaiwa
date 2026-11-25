@@ -133,6 +133,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
   const [abActive, setAbActive] = useState(false)
   const [repeatTrack, setRepeatTrack] = useState(false)
   const [autoNext, setAutoNext] = useState(true)
+  const [autoPlayRequestId, setAutoPlayRequestId] = useState(0)
 
   const trackProgress: TrackProgress = useMemo(() => {
     if (!activeTrack) {
@@ -210,9 +211,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       setPdfPage(nextPage)
 
       if (autoPlay) {
-        window.setTimeout(() => {
-          audioRef.current?.play().catch(() => {})
-        }, 80)
+        setAutoPlayRequestId((n) => n + 1)
       }
     },
     [pdfKind, state.trackProgress]
@@ -1013,6 +1012,7 @@ export const ShadowingStudio: React.FC<ShadowingStudioProps> = ({
       {/* Bottom Audio Deck */}
       <AudioDeck
         track={activeTrack}
+        autoPlayRequestId={autoPlayRequestId}
         audioRef={audioRef}
         isPlaying={isPlaying}
         onPlayingChange={setIsPlaying}

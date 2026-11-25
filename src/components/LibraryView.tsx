@@ -1,10 +1,12 @@
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
 import {
   Book,
   BookCategory,
   HomeTab,
+  MediaMode,
   StudyState,
 } from '../types'
+import { isDirectoryPickerSupported } from '../utils/localFolderCatalog'
 import { getTodayPlanDay, isPlanDayComplete } from '../utils/studyPlan'
 import { computeStreak, getTodayKey } from '../utils/time'
 import {
@@ -16,21 +18,31 @@ import {
   FileText,
   Flame,
   FolderOpen,
+  FolderSync,
+  HardDrive,
   Headphones,
+  Loader2,
   Play,
   RotateCcw,
+  ShieldCheck,
   Sparkles,
 } from 'lucide-react'
 
 interface LibraryViewProps {
   books: Book[]
+  mediaMode: MediaMode
   mediaRoot: string
   mediaRootExists: boolean
+  savedFolderName: string | null
+  folderPicking: boolean
   state: StudyState
   dueReviewCount: number
   onOpenBook: (book: Book, trackId?: string, pdfPage?: number, pdfKind?: 'main' | 'kaitou') => void
   onOpenSettings: () => void
   onNavigateTab: (tab: HomeTab) => void
+  onPickLocalFolder: () => void
+  onReconnectSavedFolder: () => void
+  onFilesSelected: (files: FileList) => void
 }
 
 const FILTER_TABS: Array<{ id: 'all' | BookCategory; label: string }> = [
@@ -42,15 +54,23 @@ const FILTER_TABS: Array<{ id: 'all' | BookCategory; label: string }> = [
 
 export const LibraryView: React.FC<LibraryViewProps> = ({
   books,
+  mediaMode,
   mediaRoot,
   mediaRootExists,
+  savedFolderName,
+  folderPicking,
   state,
   dueReviewCount,
   onOpenBook,
   onOpenSettings,
   onNavigateTab,
+  onPickLocalFolder,
+  onReconnectSavedFolder,
+  onFilesSelected,
 }) => {
   const [activeCategory, setActiveCategory] = useState<'all' | BookCategory>('all')
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const pickerSupported = isDirectoryPickerSupported()
 
   const todayKey = getTodayKey()
   const todayMinutes = Math.round((state.dailyMinutes[todayKey] || 0) * 10) / 10
@@ -108,12 +128,106 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
 
   return (
     <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
-      {/* Missing folder alert */}
-      {!mediaRootExists && (
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            onFilesSelected(e.target.files)
+          }
+          e.currentTarget.value = ''
+        }}
+      />
+
+      {/* Local-folder connection hero when on Vercel / static hosting and no folder loaded yet */}
+      {mediaMode === 'local-folder' && books.length === 0 && (
+        <section className="rounded-2xl border-2 border-indigo-200 bg-gradient-to-br from-white via-indigo-50/50 to-stone-50 p-6 shadow-sm dark:border-indigo-900 dark:from-slate-900 dark:via-indigo-950/30 dark:to-slate-900">
+          <div className="flex flex-col justify-between gap-6 lg:flex-row lg:items-center">
+            <div className="max-w-2xl space-y-2.5">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-100 px-3 py-1 text-xs font-bold text-indigoKaiwa dark:bg-indigo-950 dark:text-indigo-300">
+                <HardDrive className="h-3.5 w-3.5" />
+                Chế độ Web Online (Vercel) · Đọc sách trực tiếp từ máy bạn
+              </span>
+              <h2 className="text-xl font-bold tracking-tight sm:text-2xl">
+                Kết nối thư mục sách PDF &amp; Audio của bạn
+              </h2>
+              <p className="text-sm leading-relaxed text-stone-600 dark:text-slate-300">
+                Hãy trỏ tới thư mục <code className="rounded bg-stone-200/80 px-1.5 py-0.5 text-xs font-semibold dark:bg-slate-800">D:\02. Tiếng Nhật\luyennoi</code> trên máy tính. Hệ thống sẽ tự động nhận diện đủ 6 bộ sách, 429 file nghe và tự khớp trang PDF như khi chạy trên máy.
+              </p>
+              <p className="flex items-center gap-1.5 text-xs text-matcha dark:text-emerald-400">
+                <ShieldCheck className="h-4 w-4 shrink-0" />
+                <span>
+                  Toàn bộ file PDF &amp; MP3 được trình duyệt đọc trực tiếp tại chỗ, không upload lên server, bảo mật và mở tức thì kể cả file 126 MB.
+                </span>
+              </p>
+            </div>
+
+            <div className="flex shrink-0 flex-col gap-2.5 sm:min-w-[270px]">
+              {savedFolderName && (
+                <button
+                  type="button"
+                  disabled={folderPicking}
+                  onClick={onReconnectSavedFolder}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-matcha px-5 py-3 text-sm font-bold text-white shadow transition hover:bg-emerald-700 disabled:opacity-60"
+                >
+                  {folderPicking ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <FolderSync className="h-4 w-4" />
+                  )}
+                  Kết nối lại &ldquo;{savedFolderName}&rdquo;
+                </button>
+              )}
+
+              <button
+                type="button"
+                disabled={folderPicking}
+                onClick={() => {
+                  if (pickerSupported) onPickLocalFolder()
+                  else fileInputRef.current?.click()
+                }}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigoKaiwa px-5 py-3 text-sm font-bold text-white shadow transition hover:bg-indigo-700 disabled:opacity-60"
+              >
+                {folderPicking ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FolderOpen className="h-4 w-4" />
+                )}
+                {savedFolderName ? 'Chọn thư mục khác...' : 'Chọn thư mục sách trên máy'}
+              </button>
+
+              {pickerSupported && (
+                <button
+                  type="button"
+                  disabled={folderPicking}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                >
+                  Chọn thư mục (chế độ tương thích)
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                className="text-center text-[11px] font-medium text-indigoKaiwa hover:underline dark:text-indigo-300"
+              >
+                Hoặc kết nối tới Server Media cục bộ / từ xa trong Cài đặt
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Missing folder alert for Server mode */}
+      {mediaMode === 'server' && !mediaRootExists && (
         <div className="flex flex-col justify-between gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 text-red-900 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200 sm:flex-row sm:items-center">
           <div>
             <p className="text-sm font-semibold">
-              Không tìm thấy thư mục sách & audio:{' '}
+              Không tìm thấy thư mục sách &amp; audio:{' '}
               <code className="rounded bg-red-100 px-1.5 py-0.5 text-xs dark:bg-red-900/60">
                 {mediaRoot}
               </code>
@@ -173,7 +287,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
       {/* Quick Plan & Review Strip */}
       <section className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div className="flex items-center justify-between gap-3 rounded-2xl border border-stone-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex min-w-0 items-center gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigoKaiwa dark:bg-indigo-950/70 dark:text-indigo-300">
               <CalendarCheck2 className="h-5 w-5" />
             </div>
@@ -203,7 +317,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         </div>
 
         <div className="flex items-center justify-between gap-3 rounded-2xl border border-stone-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex min-w-0 items-center gap-3">
             <div
               className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
                 dueReviewCount > 0
@@ -299,33 +413,53 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
       </section>
 
       {/* Category Filter Tabs */}
-      <section className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap gap-2">
-          {FILTER_TABS.map((tab) => {
-            const active = activeCategory === tab.id
-            return (
+      {books.length > 0 && (
+        <section className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-2">
+            {FILTER_TABS.map((tab) => {
+              const active = activeCategory === tab.id
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveCategory(tab.id)}
+                  className={`rounded-full px-4 py-1.5 text-xs font-semibold transition ${
+                    active
+                      ? 'bg-indigoKaiwa text-white shadow-sm'
+                      : 'border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              )
+            })}
+          </div>
+          <div className="flex items-center gap-2 text-xs text-stone-500 dark:text-slate-400">
+            <FolderOpen
+              className={`h-3.5 w-3.5 ${
+                mediaMode === 'local-folder' ? 'text-matcha' : ''
+              }`}
+            />
+            <span className="max-w-xs truncate" title={mediaRoot}>
+              {mediaMode === 'local-folder'
+                ? `Đang đọc trực tiếp trên máy: ${mediaRoot}`
+                : mediaRoot}
+            </span>
+            {mediaMode === 'local-folder' && (
               <button
-                key={tab.id}
                 type="button"
-                onClick={() => setActiveCategory(tab.id)}
-                className={`rounded-full px-4 py-1.5 text-xs font-semibold transition ${
-                  active
-                    ? 'bg-indigoKaiwa text-white shadow-sm'
-                    : 'border border-stone-200 bg-white text-stone-600 hover:bg-stone-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
-                }`}
+                onClick={() => {
+                  if (pickerSupported) onPickLocalFolder()
+                  else fileInputRef.current?.click()
+                }}
+                className="font-semibold text-indigoKaiwa hover:underline dark:text-indigo-300"
               >
-                {tab.label}
+                Đổi thư mục
               </button>
-            )
-          })}
-        </div>
-        <div className="flex items-center gap-1.5 text-xs text-stone-500 dark:text-slate-400">
-          <FolderOpen className="h-3.5 w-3.5" />
-          <span className="max-w-xs truncate" title={mediaRoot}>
-            {mediaRoot}
-          </span>
-        </div>
-      </section>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Book Grid */}
       <section className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
