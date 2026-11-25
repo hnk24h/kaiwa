@@ -1,0 +1,35 @@
+{
+  "name": "kaiwa-shadowing",
+  "version": "1.0.0",
+  "description": "Kaiwa Shadowing - Web tự học luyện nói tiếng Nhật theo phương pháp Shadowing từ sách PDF & Audio",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"node server/index.mjs\" \"vite\"",
+    "server": "node server/index.mjs",
+    "build": "tsc --noEmit && vite build",
+    "start": "NODE_ENV=production node server/index.mjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "lucide-react": "^0.475.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.2",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}
